@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs');
+const fs = require('fs').promises;
 const multer = require('multer');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -17,57 +17,62 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-router.post('/trim', upload.single('file'), (req, res) => {
-    const { startTime, duration } = req.body;
+router.post('/trim', upload.single('file'), async (req, res) => {
+    try {
+        const { startTime, duration } = req.body;
 
-    // check if file is uploaded
-    if (!req.file) {
-        return res.status(400).send('No file uploaded');
+        if (!req.file) {
+            return res.status(400).send('No file uploaded');
+        }
+
+        const filePath = req.file.path;
+
+        if (isNaN(parseFloat(startTime))) {
+            return res.status(400).send('startTime must be a number');
+        }
+
+        if (isNaN(parseFloat(duration))) {
+            return res.status(400).send('duration must be a number');
+        }
+
+        const trimmedFilePath = await trimFile(filePath, startTime, duration);
+
+        res.download(trimmedFilePath, async () => {
+            console.log('File sent');
+            await cleanupFiles([filePath, trimmedFilePath]);
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Internal Server Error');
     }
-
-    const filePath = req.file.path;
-
-    // check if startTime is a number
-    if (Number.isNaN(parseFloat(startTime))) {
-        return res.status(400).send('startTime must be a number');
-    }
-
-    // check if duration is a number
-    if (Number.isNaN(parseFloat(duration))) {
-        return res.status(400).send('duration must be a number');
-    }
-
-    // trim file
-    ffmpeg(filePath)
-        .setStartTime(startTime)
-        .setDuration(duration)
-        .output(`${filePath.replace('.mp3', '-trimmed.mp3')}`)
-        .on('end', () => {
-            console.log('Trimming finished');
-        })
-        .on('error', (err) => {
-            console.error(err);
-        })
-        .run();
-
-    const fileToDownload = filePath.replace('.mp3', '-trimmed.mp3');
-
-    // send output file back
-    res.download(fileToDownload, () => {
-        console.log('File sent');
-        cleanup(filePath, fileToDownload);
-    });
 });
 
-function cleanup(filePath, fileToDownload) {
-    setTimeout(() => {
-        fs.unlink(filePath, (err) => {
-            if (err) { }
-        });
-        fs.unlink(fileToDownload, (err) => {
-            if (err) { }
-        });
-    }, 10000);
+function trimFile(filePath, startTime, duration) {
+    return new Promise((resolve, reject) => {
+        const outputFilePath = filePath.replace('.mp3', '-trimmed.mp3');
+        ffmpeg(filePath)
+            .setStartTime(startTime)
+            .setDuration(duration)
+            .output(outputFilePath)
+            .on('end', () => {
+                console.log('Trimming finished');
+                resolve(outputFilePath);
+            })
+            .on('error', (err) => {
+                console.error(err);
+                reject(err);
+            })
+            .run();
+    });
+}
+
+async function cleanupFiles(filePaths) {
+    try {
+        await Promise.all(filePaths.map(filePath => fs.unlink(filePath)));
+        console.log('Cleanup completed');
+    } catch (err) {
+        console.error('Error during cleanup', err);
+    }
 }
 
 module.exports = router;
